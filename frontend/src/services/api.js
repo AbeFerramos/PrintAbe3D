@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+export const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '');
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -86,23 +86,32 @@ export const cleanupJob = async (jobId) => {
   return response.data;
 };
 
+export const getModelUrl = (jobId) => `${API_BASE_URL}/api/v1/download/${jobId}?format=stl`;
+
 // Polling de estado (para actualización continua)
 export const pollJobStatus = async (jobId, callback, interval = 2000) => {
+  let cancelled = false;
+  let timer;
   const poll = async () => {
+    if (cancelled) return;
     try {
       const status = await getJobStatus(jobId);
+      if (cancelled) return;
       callback(status);
 
       if (status.status === 'processing' || status.status === 'queued') {
-        setTimeout(poll, interval);
+        timer = setTimeout(poll, interval);
       }
     } catch (error) {
-      console.error('Error polling job status:', error);
-      callback({ status: 'error', error: error.message });
+      if (!cancelled) callback({ status: 'error', error: error.response?.data?.detail || error.message });
     }
   };
 
   poll();
+  return () => {
+    cancelled = true;
+    clearTimeout(timer);
+  };
 };
 
 export default api;

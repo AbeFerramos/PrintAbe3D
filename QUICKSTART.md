@@ -44,11 +44,8 @@ He integrado **COLMAP API** en tu proyecto Print3D, que es una solución **100% 
 Una vez Docker Desktop esté corriendo:
 
 ```bash
-# Descargar la imagen de COLMAP API
-docker pull jourdelune876/colmap-api:latest
-
-# Ejecutar COLMAP API en el puerto 8001
-docker run --ipc=host -p 8001:8000 jourdelune876/colmap-api:latest
+# Iniciar COLMAP API en el puerto 8001
+docker compose up -d colmap
 ```
 
 **Verificar que funciona:**
@@ -63,10 +60,10 @@ curl http://localhost:8001/health
 cd backend
 
 # Crear entorno virtual
-python -m venv venv
+python -m venv .venv
 
 # Activar entorno (Windows)
-venv\Scripts\activate
+.venv\Scripts\activate
 
 # Instalar dependencias
 pip install -r requirements.txt
@@ -145,13 +142,13 @@ Necesitarás 3 terminales:
 
 **Terminal 1 - COLMAP API:**
 ```bash
-docker run --ipc=host -p 8001:8000 jourdelune876/colmap-api:latest
+docker compose up -d colmap
 ```
 
 **Terminal 2 - Backend:**
 ```bash
 cd backend
-venv\Scripts\activate
+.venv\Scripts\activate
 python main.py
 ```
 

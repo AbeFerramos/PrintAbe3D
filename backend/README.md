@@ -10,19 +10,19 @@ Backend en Python para procesamiento de videos y reconstrucción 3D con COLMAP A
 - ✅ **Reconstrucción 3D con COLMAP API (100% gratis)**
 - ✅ Procesamiento y reparación de mallas 3D
 - ✅ Validación para impresión 3D
-- ✅ Exportación a STL/3MF/OBJ
+- ✅ Exportación a STL desde la reconstrucción
 
 ## Instalación
 
 ```bash
 # Crear entorno virtual
-python -m venv venv
+python -m venv .venv
 
 # Activar entorno (Windows)
-venv\Scripts\activate
+.venv\Scripts\activate
 
 # Activar entorno (Linux/Mac)
-source venv/bin/activate
+source .venv/bin/activate
 
 # Instalar dependencias
 pip install -r requirements.txt
@@ -51,7 +51,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
 ## API Endpoints
 
 ### POST /api/v1/upload
-Sube un video para procesamiento.
+Sube un video para extraer fotogramas. El límite por defecto es 500 MiB (`MAX_UPLOAD_BYTES`).
 
 **Parámetros:**
 - `file`: Archivo de video (multipart/form-data)
@@ -86,16 +86,20 @@ Obtiene información sobre los fotogramas extraídos.
 Inicia la reconstrucción 3D.
 
 **Parámetros:**
-- `method`: "api_external" o "local_photogrammetry"
+- `method`: actualmente solo se admite `colmap`.
 
 ### GET /api/v1/download/{job_id}
-Descarga el modelo 3D generado.
+Descarga el modelo STL generado.
 
 **Parámetros:**
-- `format`: "stl", "3mf", u "obj"
+- `format`: `stl` (3MF y OBJ todavía no están conectados al flujo de reconstrucción).
 
 ### DELETE /api/v1/cleanup/{job_id}
 Limpia los archivos temporales.
+
+## Dependencia de reconstrucción
+
+El backend requiere el servicio COLMAP configurado en `COLMAP_API_URL` (por defecto `http://localhost:8001`). La API debe aceptar `POST /sfm` y devolver un ZIP con una malla PLY/OBJ o una nube PLY con puntos suficientes para intentar generar una superficie. COLMAP no fija la escala física del objeto: revisa y ajusta la escala en el laminador antes de imprimir. La vista previa del frontend carga el STL producido por este flujo.
 
 ## Uso del MeshProcessor
 

@@ -1,0 +1,8 @@
+services:
+  colmap:
+    image: jourdelune876/colmap-api:latest
+    container_name: print3d-colmap
+    ports:
+      - "8001:8000"
+    shm_size: 2gb
+    restart: unless-stopped

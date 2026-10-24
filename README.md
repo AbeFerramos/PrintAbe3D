@@ -4,7 +4,7 @@ Aplicación full-stack para convertir videos rotativos de 360° en modelos 3D li
 
 ## 🎯 Objetivo
 
-Transformar videos o series de imágenes de objetos en modelos 3D digitales listos para exportar en formato STL o 3MF para impresión 3D.
+Transformar videos o series de imágenes de objetos en modelos 3D digitales exportables a STL para impresión 3D.
 
 ## 📹 Video vs Imágenes para Reconstrucción 3D
 
@@ -95,9 +95,8 @@ Transformar videos o series de imágenes de objetos en modelos 3D digitales list
 
 #### Opción A: Docker (Recomendada)
 ```bash
-# Descargar y ejecutar COLMAP API
-docker pull jourdelune876/colmap-api:latest
-docker run --ipc=host -p 8001:8000 colmap-api:latest
+# Iniciar COLMAP API con la configuración del proyecto
+docker compose up -d colmap
 
 # Verificar que funciona
 curl http://localhost:8001/health
@@ -112,13 +111,13 @@ Consulta `backend/COLMAP_SETUP.md` para instrucciones detalladas.
 cd backend
 
 # Crear entorno virtual
-python -m venv venv
+python -m venv .venv
 
 # Activar entorno (Windows)
-venv\Scripts\activate
+.venv\Scripts\activate
 
 # Activar entorno (Linux/Mac)
-source venv/bin/activate
+source .venv/bin/activate
 
 # Instalar dependencias
 pip install -r requirements.txt
@@ -188,7 +187,7 @@ Antes de usar la aplicación, asegúrate de:
 1. **COLMAP API ejecutándose:**
    ```bash
    # Terminal 1 - COLMAP API
-   docker run --ipc=host -p 8001:8000 colmap-api:latest
+   docker compose up -d colmap
    ```
 
 2. **Backend Print3D ejecutándose:**
@@ -235,16 +234,16 @@ Antes de usar la aplicación, asegúrate de:
 - ✅ Extracción automática de fotogramas clave
 - ✅ Análisis de calidad de video
 - ✅ Preparación para reconstrucción 3D
-- ✅ Procesamiento y reparación de mallas 3D
-- ✅ Validación para impresión 3D
-- ✅ Exportación a STL/3MF/OBJ
+- ✅ Herramientas de reparación y validación de mallas disponibles en el backend
+- ⏳ Reparación automática integrada en la reconstrucción
+- ✅ Exportación y descarga STL en el flujo principal (3MF/OBJ pendientes)
 
 ### Frontend
 - ✅ Interfaz moderna y responsiva
 - ✅ Carga de videos con drag & drop
 - ✅ Seguimiento en tiempo real del procesamiento
-- ✅ Visor 3D interactivo con Three.js
-- ✅ Descarga de modelos STL/3MF/OBJ
+- ✅ Visor 3D interactivo que carga el STL reconstruido
+- ✅ Descarga de modelos STL (3MF/OBJ pendientes)
 - ✅ Diseño intuitivo con guía paso a paso
 
 ## 🔮 Próximos Pasos

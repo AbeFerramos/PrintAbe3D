@@ -10,6 +10,8 @@ import shutil
 from pathlib import Path
 from typing import Optional, List
 import logging
+from contextlib import ExitStack
+import numpy as np
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -69,17 +71,17 @@ class COLMAPIntegration:
         logger.info(f"Iniciando reconstrucción COLMAP con {len(image_paths)} imágenes")
         
         # Preparar archivos para subida
-        files = []
-        for idx, image_path in enumerate(image_paths):
-            if os.path.exists(image_path):
-                files.append(('images', open(image_path, 'rb')))
-            else:
-                logger.warning(f"Imagen no encontrada: {image_path}")
-        
-        if not files:
+        valid_paths = [path for path in image_paths if os.path.isfile(path)]
+        missing_paths = set(image_paths) - set(valid_paths)
+        for image_path in missing_paths:
+            logger.warning("Imagen no encontrada: %s", image_path)
+        if len(valid_paths) < 2:
             raise ValueError("No se encontraron imágenes válidas para procesar")
         
-        try:
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        with ExitStack() as stack:
+            files = [('images', (Path(path).name, stack.enter_context(open(path, 'rb')), 'application/octet-stream')) for path in valid_paths]
             # Llamar a COLMAP API
             data = {
                 'retrieval_conf_key': retrieval_conf,
@@ -92,31 +94,30 @@ class COLMAPIntegration:
                 self.sfm_endpoint,
                 files=files,
                 data=data,
-                timeout=300  # 5 minutos timeout para reconstrucción
+                timeout=(15, 1800)  # 30 minutos para reconstrucciones pesadas
             )
-            
-            # Cerrar archivos
-            for _, file in files:
-                file.close()
-            
-            if response.status_code != 200:
-                raise Exception(f"COLMAP API error: {response.status_code} - {response.text}")
+            if not response.ok:
+                raise RuntimeError(f"COLMAP API respondió {response.status_code}: {response.text[:1000]}")
             
             # Guardar resultado ZIP
-            output_path = Path(output_dir)
-            output_path.mkdir(parents=True, exist_ok=True)
-            
             zip_path = output_path / "colmap_result.zip"
-            with open(zip_path, 'wb') as f:
-                f.write(response.content)
+            if not response.content.startswith(b"PK"):
+                raise RuntimeError("COLMAP respondió con un formato inesperado; se esperaba un archivo ZIP")
+            zip_path.write_bytes(response.content)
             
             logger.info(f"Reconstrucción completada. Resultado guardado en: {zip_path}")
             
             # Extraer ZIP
             extract_dir = output_path / "colmap_extracted"
-            extract_dir.mkdir(exist_ok=True)
-            
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir)
+            extract_dir.mkdir(parents=True)
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                root = extract_dir.resolve()
+                for member in zip_ref.infolist():
+                    target = (extract_dir / member.filename).resolve()
+                    if target != root and root not in target.parents:
+                        raise ValueError("La respuesta ZIP de COLMAP contiene una ruta no válida")
                 zip_ref.extractall(extract_dir)
             
             logger.info(f"Archivos extraídos en: {extract_dir}")
@@ -129,20 +130,10 @@ class COLMAPIntegration:
                 "zip_path": str(zip_path),
                 "extract_dir": str(extract_dir),
                 "mesh_files": mesh_files,
-                "num_images": len(image_paths),
+                "num_images": len(valid_paths),
                 "method": "colmap_photogrammetry"
             }
-            
-        except Exception as e:
-            logger.error(f"Error en reconstrucción COLMAP: {e}")
-            # Cerrar archivos en caso de error
-            for _, file in files:
-                try:
-                    file.close()
-                except:
-                    pass
-            raise
-    
+        
     def _find_mesh_files(self, directory: Path) -> dict:
         """Busca archivos de malla en el directorio extraído."""
         mesh_files = {
@@ -193,17 +184,41 @@ class COLMAPIntegration:
                 else:
                     raise ValueError(f"Formato no soportado: {input_mesh}")
                 
-                # Verificar que la malla tiene vértices y caras
+                # COLMAP suele devolver nubes de puntos PLY. Crear una superficie
+                # imprimible cuando el archivo todavía no contiene triángulos.
                 if len(mesh.vertices) == 0 or len(mesh.triangles) == 0:
-                    logger.warning("La malla no tiene geometría válida")
-                    return False
+                    cloud = o3d.io.read_point_cloud(input_mesh)
+                    if len(cloud.points) < 30:
+                        logger.warning("COLMAP no devolvió suficientes puntos para crear una malla")
+                        return False
+                    distances = cloud.compute_nearest_neighbor_distance()
+                    if len(distances) == 0:
+                        return False
+                    average_spacing = float(np.mean(distances))
+                    cloud.estimate_normals(
+                        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=average_spacing * 4, max_nn=30)
+                    )
+                    cloud.orient_normals_consistent_tangent_plane(30)
+                    mesh, _density = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                        cloud, depth=9, width=0, scale=1.1, linear_fit=False
+                    )
+                    # Elimina fragmentos muy pequeños que suelen ser ruido de reconstrucción.
+                    components, component_counts, _ = mesh.cluster_connected_triangles()
+                    if len(component_counts):
+                        largest = int(np.argmax(component_counts))
+                        mesh.remove_triangles_by_mask(np.asarray(components) != largest)
+                    mesh.remove_unreferenced_vertices()
+                    mesh.remove_degenerate_triangles()
+                    if len(mesh.triangles) == 0:
+                        return False
                 
-                # Calcular normales si no existen
-                if not mesh.has_vertex_normals():
-                    mesh.compute_vertex_normals()
+                # El exportador STL requiere normales de caras y de vértices.
+                mesh.compute_triangle_normals()
+                mesh.compute_vertex_normals()
                 
                 # Guardar como STL
-                o3d.io.write_triangle_mesh(output_stl, mesh)
+                if not o3d.io.write_triangle_mesh(output_stl, mesh, write_ascii=False):
+                    return False
                 
                 logger.info(f"Malla convertida a STL con Open3D: {output_stl}")
                 return True

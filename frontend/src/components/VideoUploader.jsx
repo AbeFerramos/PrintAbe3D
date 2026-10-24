@@ -1,99 +1,55 @@
 import React, { useState, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Upload, Film, X } from 'lucide-react';
+import { Film, Upload, X } from 'lucide-react';
 
 const VideoUploader = ({ onUpload, uploading }) => {
   const [selectedFile, setSelectedFile] = useState(null);
   const [frameInterval, setFrameInterval] = useState(30);
 
   const onDrop = useCallback((acceptedFiles) => {
-    if (acceptedFiles.length > 0) {
-      setSelectedFile(acceptedFiles[0]);
-    }
+    if (acceptedFiles.length > 0) setSelectedFile(acceptedFiles[0]);
   }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: {
-      'video/*': ['.mp4', '.avi', '.mov', '.mkv']
-    },
+    accept: { 'video/*': ['.mp4', '.avi', '.mov', '.mkv'] },
     maxFiles: 1,
     disabled: uploading
   });
 
   const handleUpload = async () => {
-    if (selectedFile && onUpload) {
-      await onUpload(selectedFile, frameInterval);
-    }
-  };
-
-  const handleRemoveFile = () => {
-    setSelectedFile(null);
+    if (selectedFile && onUpload) await onUpload(selectedFile, frameInterval);
   };
 
   return (
-    <div className="card">
-      <h2><Film className="inline mr-2" /> Subir Video 360°</h2>
-      
+    <div className="uploader-card">
       {!selectedFile ? (
-        <div
-          {...getRootProps()}
-          className={`dropzone ${isDragActive ? 'active' : ''}`}
-        >
+        <div {...getRootProps()} className={`dropzone ${isDragActive ? 'active' : ''}`}>
           <input {...getInputProps()} />
-          <Upload size={48} className="mx-auto mb-4 text-gray-400" />
-          <p className="text-lg mb-2">
-            {isDragActive ? 'Suelta el video aquí' : 'Arrastra y suelta un video aquí'}
-          </p>
-          <p className="text-sm text-gray-500">
-            O haz clic para seleccionar (MP4, AVI, MOV, MKV)
-          </p>
+          <div className="upload-icon"><Upload size={22} /></div>
+          <p className="dropzone-title">{isDragActive ? 'Suelta el vídeo para añadirlo' : 'Arrastra aquí tu vídeo 360°'}</p>
+          <p className="dropzone-subtitle">o haz clic para buscarlo en tu equipo</p>
+          <span className="dropzone-hint">MP4 · AVI · MOV · MKV</span>
         </div>
       ) : (
         <div className="selected-file">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center">
-              <Film className="mr-3 text-purple-600" size={24} />
-              <div>
-                <p className="font-semibold">{selectedFile.name}</p>
-                <p className="text-sm text-gray-500">
-                  {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB
-                </p>
-              </div>
+          <div className="file-row">
+            <div className="file-kind"><Film size={18} /></div>
+            <div className="file-info">
+              <strong title={selectedFile.name}>{selectedFile.name}</strong>
+              <span>{(selectedFile.size / (1024 * 1024)).toFixed(2)} MB · Vídeo seleccionado</span>
             </div>
-            <button
-              onClick={handleRemoveFile}
-              className="text-red-500 hover:text-red-700"
-              disabled={uploading}
-            >
-              <X size={20} />
-            </button>
+            <button type="button" onClick={() => setSelectedFile(null)} className="icon-button" aria-label="Quitar vídeo" disabled={uploading}><X size={15} /></button>
           </div>
 
-          <div className="mb-4">
-            <label className="block text-sm font-medium mb-2">
-              Intervalo de extracción de frames: {frameInterval}
-            </label>
-            <input
-              type="range"
-              min="10"
-              max="60"
-              value={frameInterval}
-              onChange={(e) => setFrameInterval(parseInt(e.target.value))}
-              className="w-full"
-              disabled={uploading}
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              Menor intervalo = más frames = mejor calidad pero más tiempo
-            </p>
-          </div>
+          <label className="field-label" htmlFor="frame-interval">
+            <span>Frecuencia de fotogramas</span><output>{frameInterval} frames</output>
+          </label>
+          <input id="frame-interval" type="range" min="10" max="60" value={frameInterval} onChange={(event) => setFrameInterval(Number(event.target.value))} disabled={uploading} />
+          <p className="field-hint">Un valor menor extrae más imágenes y puede mejorar el detalle, con un tiempo de proceso mayor.</p>
 
-          <button
-            onClick={handleUpload}
-            className="btn w-full"
-            disabled={uploading}
-          >
-            {uploading ? 'Procesando...' : 'Iniciar Procesamiento'}
+          <button type="button" onClick={handleUpload} className="primary-button" disabled={uploading}>
+            {uploading ? 'Preparando fotogramas…' : <><Upload size={15} /> Extraer fotogramas</>}
           </button>
         </div>
       )}

@@ -1,42 +1,58 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import cv2
-import numpy as np
 import os
 import shutil
 from pathlib import Path
-from typing import Optional
 import uuid
 from datetime import datetime
+from contextlib import asynccontextmanager
 import aiofiles
-import asyncio
 import logging
+from dotenv import load_dotenv
+from PIL import Image
 from colmap_integration import COLMAPIntegration
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Video to 3D API", version="1.0.0")
+@asynccontextmanager
+async def lifespan(_app):
+    logger.info("Servidor Video to 3D API iniciado")
+    logger.info("Directorio de uploads: %s", UPLOAD_DIR.absolute())
+    logger.info("Directorio de frames: %s", FRAMES_DIR.absolute())
+    logger.info("Directorio de output: %s", OUTPUT_DIR.absolute())
+    yield
+
+
+app = FastAPI(title="Video to 3D API", version="1.0.0", lifespan=lifespan)
 
 # Configurar CORS
+allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # En producción, especificar dominios
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Directorios de trabajo
-UPLOAD_DIR = Path("uploads")
-FRAMES_DIR = Path("frames")
-OUTPUT_DIR = Path("output")
-TEMP_DIR = Path("temp")
+# Directorios de trabajo, relativos al backend por defecto.
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", BASE_DIR / "uploads"))
+FRAMES_DIR = Path(os.getenv("FRAMES_DIR", BASE_DIR / "frames"))
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", BASE_DIR / "output"))
+TEMP_DIR = Path(os.getenv("TEMP_DIR", BASE_DIR / "temp"))
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 500 * 1024 * 1024))
+MAX_TOTAL_UPLOAD_BYTES = int(os.getenv("MAX_TOTAL_UPLOAD_BYTES", 1024 * 1024 * 1024))
+MAX_IMAGE_COUNT = int(os.getenv("MAX_IMAGE_COUNT", 100))
 
 # Crear directorios si no existen
 for directory in [UPLOAD_DIR, FRAMES_DIR, OUTPUT_DIR, TEMP_DIR]:
-    directory.mkdir(exist_ok=True)
+    directory.mkdir(parents=True, exist_ok=True)
 
 # Almacenamiento en memoria del estado de procesamiento
 processing_status = {}
@@ -48,7 +64,7 @@ class VideoProcessor:
         self.job_id = job_id
         self.output_frames_dir = FRAMES_DIR / job_id
         
-    def extract_key_frames(self, frame_interval: int = 30) -> list:
+    def extract_key_frames(self, frame_interval: int = 30) -> dict:
         """
         Extrae fotogramas clave del video a intervalos regulares.
         frame_interval: Extraer 1 frame cada N frames (30 = 1 frame por segundo aprox en video 30fps)
@@ -62,7 +78,7 @@ class VideoProcessor:
         
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
-            raise HTTPException(status_code=400, detail="No se pudo abrir el video")
+            raise ValueError("No se pudo abrir el video. Comprueba que el archivo no esté dañado.")
         
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -82,7 +98,9 @@ class VideoProcessor:
             if frame_count % frame_interval == 0:
                 # Guardar frame
                 frame_path = self.output_frames_dir / f"frame_{saved_count:04d}.jpg"
-                cv2.imwrite(str(frame_path), frame)
+                if not cv2.imwrite(str(frame_path), frame):
+                    cap.release()
+                    raise ValueError("No se pudo guardar un fotograma del video")
                 extracted_frames.append(str(frame_path))
                 saved_count += 1
                 
@@ -94,6 +112,8 @@ class VideoProcessor:
             frame_count += 1
         
         cap.release()
+        if saved_count == 0:
+            raise ValueError("No se pudieron extraer fotogramas del video")
         
         processing_status[self.job_id]["stage"] = "frames_extracted"
         processing_status[self.job_id]["message"] = f"Se extrajeron {saved_count} fotogramas"
@@ -138,15 +158,6 @@ class VideoProcessor:
         }
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Inicializar el servidor"""
-    print("🚀 Servidor Video to 3D API iniciado")
-    print(f"📁 Directorio de uploads: {UPLOAD_DIR.absolute()}")
-    print(f"📁 Directorio de frames: {FRAMES_DIR.absolute()}")
-    print(f"📁 Directorio de output: {OUTPUT_DIR.absolute()}")
-
-
 @app.get("/")
 async def root():
     return {
@@ -165,25 +176,38 @@ async def root():
 async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    frame_interval: Optional[int] = 30
+    frame_interval: int = Form(default=30, ge=1, le=300)
 ):
     """
     Sube un video y comienza el procesamiento para extracción de fotogramas.
     """
     # Validar tipo de archivo
-    if not file.content_type.startswith("video/"):
+    allowed_extensions = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
+    file_extension = Path(file.filename or "").suffix.lower()
+    if file_extension not in allowed_extensions:
         raise HTTPException(status_code=400, detail="El archivo debe ser un video")
     
     # Generar ID único para el job
     job_id = str(uuid.uuid4())
     
     # Guardar archivo subido
-    file_extension = Path(file.filename).suffix
     video_path = UPLOAD_DIR / f"{job_id}{file_extension}"
-    
-    async with aiofiles.open(video_path, 'wb') as f:
-        content = await file.read()
-        await f.write(content)
+    total_bytes = 0
+    try:
+        async with aiofiles.open(video_path, 'wb') as f:
+            while chunk := await file.read(1024 * 1024):
+                total_bytes += len(chunk)
+                if total_bytes > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="El video supera el límite de tamaño configurado")
+                await f.write(chunk)
+    except Exception:
+        video_path.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+    if total_bytes == 0:
+        video_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="El archivo está vacío")
     
     # Inicializar estado del job
     processing_status[job_id] = {
@@ -193,7 +217,7 @@ async def upload_video(
         "message": "Video subido exitosamente",
         "created_at": datetime.now().isoformat(),
         "video_path": str(video_path),
-        "original_filename": file.filename
+        "original_filename": file.filename or video_path.name
     }
     
     # Procesar en background
@@ -232,19 +256,20 @@ async def upload_video(
 
 @app.post("/api/v1/upload-images")
 async def upload_images(
-    background_tasks: BackgroundTasks,
     images: list[UploadFile] = File(...)
 ):
     """
     Sube múltiples imágenes y las prepara para reconstrucción 3D.
     """
-    if not images:
-        raise HTTPException(status_code=400, detail="Debe subir al menos una imagen")
+    if len(images) < 2:
+        raise HTTPException(status_code=400, detail="Sube al menos 2 imágenes para reconstruir el objeto")
+    if len(images) > MAX_IMAGE_COUNT:
+        raise HTTPException(status_code=413, detail=f"El máximo permitido es {MAX_IMAGE_COUNT} imágenes por reconstrucción")
     
     # Validar que sean imágenes
     for image in images:
-        if not image.content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail=f"El archivo {image.filename} no es una imagen")
+        if Path(image.filename or "").suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+            raise HTTPException(status_code=400, detail=f"Formato de imagen no admitido: {image.filename}")
     
     # Generar ID único para el job
     job_id = str(uuid.uuid4())
@@ -255,13 +280,30 @@ async def upload_images(
     
     # Guardar imágenes subidas
     image_paths = []
+    total_upload_bytes = 0
     for idx, image in enumerate(images):
-        file_extension = Path(image.filename).suffix
+        file_extension = Path(image.filename or "image.jpg").suffix.lower()
         image_path = images_dir / f"image_{idx:04d}{file_extension}"
         
-        async with aiofiles.open(image_path, 'wb') as f:
-            content = await image.read()
-            await f.write(content)
+        total_bytes = 0
+        try:
+            async with aiofiles.open(image_path, 'wb') as f:
+                while chunk := await image.read(1024 * 1024):
+                    total_bytes += len(chunk)
+                    total_upload_bytes += len(chunk)
+                    if total_bytes > MAX_UPLOAD_BYTES or total_upload_bytes > MAX_TOTAL_UPLOAD_BYTES:
+                        raise HTTPException(status_code=413, detail="La carga de imágenes supera el límite de tamaño configurado")
+                    await f.write(chunk)
+            if total_bytes == 0:
+                raise HTTPException(status_code=400, detail=f"La imagen {image.filename} está vacía")
+            with Image.open(image_path) as decoded_image:
+                decoded_image.verify()
+        except Exception:
+            image_path.unlink(missing_ok=True)
+            shutil.rmtree(images_dir, ignore_errors=True)
+            raise
+        finally:
+            await image.close()
         
         image_paths.append(str(image_path))
     
@@ -327,7 +369,7 @@ async def get_frames_info(job_id: str):
 async def reconstruct_3d(
     job_id: str,
     background_tasks: BackgroundTasks,
-    method: str = "colmap"  # "colmap", "api_external" o "local_photogrammetry"
+    method: str = Query(default="colmap", pattern="^colmap$")
 ):
     """
     Inicia la reconstrucción 3D usando el método especificado.
@@ -335,32 +377,24 @@ async def reconstruct_3d(
     if job_id not in processing_status:
         raise HTTPException(status_code=404, detail="Job no encontrado")
     
-    if processing_status[job_id]["status"] != "completed":
+    job_status = processing_status[job_id]
+    can_retry_reconstruction = (
+        job_status.get("status") == "failed"
+        and job_status.get("stage") == "reconstruction_error"
+    )
+    if job_status.get("status") != "completed" and not can_retry_reconstruction:
         raise HTTPException(status_code=400, detail="Los fotogramas deben estar extraídos primero")
     
     processing_status[job_id]["status"] = "processing"
     processing_status[job_id]["stage"] = "reconstructing_3d"
     processing_status[job_id]["message"] = "Iniciando reconstrucción 3D..."
     processing_status[job_id]["reconstruction_method"] = method
+    processing_status[job_id].pop("error", None)
+    (OUTPUT_DIR / f"{job_id}.stl").unlink(missing_ok=True)
     
     def perform_reconstruction():
         try:
-            if method == "api_external":
-                # Aquí se integraría con APIs como Meshy, Tripo3D, etc.
-                # Por ahora, simulamos el proceso
-                import time
-                for i in range(0, 101, 10):
-                    time.sleep(1)
-                    processing_status[job_id]["progress"] = i
-                    processing_status[job_id]["message"] = f"Reconstruyendo modelo 3D: {i}%"
-                
-                # Simular generación de archivo (en producción esto vendría de la API)
-                output_path = OUTPUT_DIR / f"{job_id}.stl"
-                # Crear archivo dummy
-                with open(output_path, 'w') as f:
-                    f.write("STL dummy file - en producción esto sería el modelo real")
-                
-            elif method == "colmap":
+            if method == "colmap":
                 # Usar COLMAP API para fotogrametría gratuita
                 processing_status[job_id]["message"] = "Iniciando reconstrucción con COLMAP..."
                 processing_status[job_id]["progress"] = 10
@@ -371,12 +405,10 @@ async def reconstruct_3d(
                     raise Exception("Directorio de imágenes no encontrado")
                 
                 # Obtener lista de imágenes (soportar múltiples formatos)
-                image_extensions = ["*.jpg", "*.jpeg", "*.png", "*.webp", "*.JPG", "*.JPEG", "*.PNG", "*.WEBP"]
-                frame_files = []
-                for ext in image_extensions:
-                    frame_files.extend(frames_dir.glob(ext))
-                
-                frame_files = sorted(frame_files)
+                image_extensions = ["*.jpg", "*.jpeg", "*.png", "*.webp"]
+                frame_files = sorted({
+                    path for extension in image_extensions for path in frames_dir.glob(extension)
+                })
                 
                 if not frame_files:
                     raise Exception("No se encontraron imágenes para procesar. Asegúrate de subir imágenes válidas.")
@@ -388,9 +420,6 @@ async def reconstruct_3d(
                 colmap_api_url = os.getenv("COLMAP_API_URL", "http://localhost:8001")
                 print(f"Conectando a COLMAP API en: {colmap_api_url}")
                 colmap = COLMAPIntegration(colmap_api_url)
-                
-                # No verificar health check, asumimos que COLMAP API está disponible
-                print("Saltando health check, asumiendo COLMAP API disponible...")
                 
                 processing_status[job_id]["message"] = "Enviando frames a COLMAP API..."
                 processing_status[job_id]["progress"] = 30
@@ -415,24 +444,25 @@ async def reconstruct_3d(
                         shutil.copy(stl_source, stl_dest)
                         processing_status[job_id]["stl_file"] = str(stl_dest)
                     else:
-                        # Intentar convertir desde PLY si no hay STL
-                        if result["mesh_files"].get("ply"):
-                            ply_file = result["mesh_files"]["ply"]
-                            stl_dest = OUTPUT_DIR / f"{job_id}.stl"
-                            if colmap.convert_to_stl(ply_file, str(stl_dest)):
-                                processing_status[job_id]["stl_file"] = str(stl_dest)
-                            else:
-                                # Si no hay malla pero hay point cloud, informar al usuario
-                                if result["mesh_files"].get("point_cloud"):
-                                    raise Exception("COLMAP generó solo una nube de puntos, no una malla 3D completa. Intenta con más imágenes o mejores ángulos.")
-                                else:
-                                    raise Exception("No se pudo convertir la malla a STL. COLMAP no generó una malla válida. Intenta con más imágenes (mínimo 12-20) desde diferentes ángulos.")
-                        else:
+                        # Probar todos los formatos de malla recibidos; un PLY de
+                        # nube de puntos puede fallar aunque el ZIP incluya un OBJ válido.
+                        mesh_files = result.get("mesh_files", {})
+                        stl_dest = OUTPUT_DIR / f"{job_id}.stl"
+                        mesh_candidates = [mesh_files.get("ply"), mesh_files.get("obj")]
+                        converted = any(
+                            colmap.convert_to_stl(mesh_path, str(stl_dest))
+                            for mesh_path in mesh_candidates if mesh_path
+                        )
+                        if converted:
+                            processing_status[job_id]["stl_file"] = str(stl_dest)
+                        elif not mesh_candidates or not any(mesh_candidates):
                             # Si no hay malla pero hay point cloud, informar al usuario
-                            if result["mesh_files"].get("point_cloud"):
+                            if mesh_files.get("point_cloud") or mesh_files.get("ply"):
                                 raise Exception("COLMAP generó solo una nube de puntos, no una malla 3D completa. Intenta con más imágenes o mejores ángulos.")
                             else:
                                 raise Exception("No se encontró malla válida en la reconstrucción. COLMAP pudo no generar suficientes puntos 3D. Intenta con más imágenes (mínimo 12-20) desde diferentes ángulos con mayor superposición.")
+                        else:
+                            raise Exception("No se pudo convertir ninguna malla COLMAP a STL. Verifica que el ZIP incluya una malla válida.")
                     
                     processing_status[job_id]["colmap_result"] = result
                     processing_status[job_id]["message"] = "Reconstrucción 3D completada con COLMAP"
@@ -440,10 +470,8 @@ async def reconstruct_3d(
                 else:
                     raise Exception("La reconstrucción COLMAP falló")
                 
-            elif method == "local_photogrammetry":
-                # Aquí se implementaría fotogrametría local con COLMAP + OpenMVS
-                processing_status[job_id]["message"] = "Fotogrametría local no implementada aún"
-                raise NotImplementedError("Fotogrametría local requiere configuración adicional")
+            if not (OUTPUT_DIR / f"{job_id}.stl").is_file() or (OUTPUT_DIR / f"{job_id}.stl").stat().st_size == 0:
+                raise ValueError("COLMAP no produjo un archivo STL válido")
             
             processing_status[job_id]["status"] = "completed"
             processing_status[job_id]["stage"] = "reconstruction_completed"
@@ -479,6 +507,8 @@ async def download_model(job_id: str, format: str = "stl"):
         raise HTTPException(status_code=400, detail="El modelo 3D no está listo aún")
     
     file_extension = format.lower()
+    if file_extension != "stl":
+        raise HTTPException(status_code=400, detail="Por ahora solo está disponible la descarga en formato STL")
     output_path = OUTPUT_DIR / f"{job_id}.{file_extension}"
     
     if not output_path.exists():
@@ -498,20 +528,26 @@ async def cleanup_job(job_id: str):
     """
     if job_id not in processing_status:
         raise HTTPException(status_code=404, detail="Job no encontrado")
+    if processing_status[job_id].get("status") in {"queued", "processing"}:
+        raise HTTPException(status_code=409, detail="No se puede limpiar un trabajo que sigue procesándose")
     
     # Eliminar archivos temporales
     try:
-        video_path = Path(processing_status[job_id].get("video_path"))
-        if video_path.exists():
+        video_path_value = processing_status[job_id].get("video_path")
+        if video_path_value and Path(video_path_value).exists():
+            video_path = Path(video_path_value)
             video_path.unlink()
         
         frames_dir = FRAMES_DIR / job_id
         if frames_dir.exists():
             shutil.rmtree(frames_dir)
         
-        output_file = OUTPUT_DIR / f"{job_id}.stl"
-        if output_file.exists():
-            output_file.unlink()
+        job_output_dir = OUTPUT_DIR / job_id
+        if job_output_dir.exists():
+            shutil.rmtree(job_output_dir)
+        for suffix in ("stl", "obj", "3mf"):
+            output_file = OUTPUT_DIR / f"{job_id}.{suffix}"
+            output_file.unlink(missing_ok=True)
         
         # Eliminar del estado
         del processing_status[job_id]
@@ -524,4 +560,9 @@ async def cleanup_job(job_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app,
+        host=os.getenv("API_HOST", "0.0.0.0"),
+        port=int(os.getenv("API_PORT", "8000")),
+        reload=os.getenv("DEBUG", "false").lower() == "true",
+    )

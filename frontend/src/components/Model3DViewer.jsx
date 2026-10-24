@@ -1,100 +1,98 @@
-import React, { Suspense, useState } from 'react';
+import React, { Suspense, useEffect, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { OrbitControls, Grid, Environment } from '@react-three/drei';
-import { Box, Loader } from 'lucide-react';
+import { OrbitControls, Grid, Environment, Html } from '@react-three/drei';
+import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+import { Box, Download, Loader, MousePointer2, Rotate3D } from 'lucide-react';
+import * as THREE from 'three';
 
-const Model3DViewer = ({ modelUrl, onDownload, downloading }) => {
+function STLModel({ url }) {
+  const [geometry, setGeometry] = useState(null);
   const [error, setError] = useState(null);
 
-  const handleDownload = () => {
-    if (onDownload) {
-      onDownload();
-    }
-  };
+  useEffect(() => {
+    let active = true;
+    let loadedGeometry;
+    setGeometry(null);
+    setError(null);
+    new STLLoader().load(url, (source) => {
+      if (!active) { source.dispose(); return; }
+      source.computeVertexNormals();
+      const bounds = new THREE.Box3().setFromBufferAttribute(source.attributes.position);
+      const center = bounds.getCenter(new THREE.Vector3());
+      const size = bounds.getSize(new THREE.Vector3());
+      const maxDimension = Math.max(size.x, size.y, size.z);
+      if (!Number.isFinite(maxDimension) || maxDimension === 0) {
+        source.dispose();
+        setError('El archivo STL no contiene una malla válida.');
+        return;
+      }
+      source.translate(-center.x, -center.y, -center.z);
+      source.scale(3 / maxDimension, 3 / maxDimension, 3 / maxDimension);
+      loadedGeometry = source;
+      setGeometry(source);
+    }, undefined, () => active && setError('No se pudo cargar el modelo STL.'));
 
-  // Placeholder cuando no hay modelo cargado
-  const Placeholder = () => (
-    <mesh position={[0, 0, 0]}>
-      <boxGeometry args={[2, 2, 2]} />
-      <meshStandardMaterial color="#667eea" wireframe />
-    </mesh>
-  );
+    return () => { active = false; loadedGeometry?.dispose(); };
+  }, [url]);
 
-  // Componente para cargar modelo STL
-  const STLModel = () => {
-    // En una implementación real, aquí cargaríamos el archivo STL
-    // Por ahora usamos un placeholder
-    return <Placeholder />;
-  };
+  if (error) return <Html center><div className="error-message">{error}</div></Html>;
+  if (!geometry) return null;
+  return <mesh geometry={geometry}><meshStandardMaterial color="#b9db83" metalness={0.12} roughness={0.56} /></mesh>;
+}
 
-  return (
-    <div className="card">
-      <div className="flex justify-between items-center mb-4">
-        <h2><Box className="inline mr-2" /> Visor 3D</h2>
-        {modelUrl && (
-          <button
-            onClick={handleDownload}
-            className="btn btn-success"
-            disabled={downloading}
-          >
-            {downloading ? 'Descargando...' : 'Descargar STL'}
-          </button>
-        )}
+class ViewerErrorBoundary extends React.Component {
+  state = { hasError: false };
+  static getDerivedStateFromError() { return { hasError: true }; }
+  componentDidUpdate(previousProps) {
+    if (previousProps.resetKey !== this.props.resetKey && this.state.hasError) this.setState({ hasError: false });
+  }
+  render() {
+    return this.state.hasError ? <div className="error-message">No se pudo mostrar el modelo 3D.</div> : this.props.children;
+  }
+}
+
+const Model3DViewer = ({ modelUrl, onDownload, downloading }) => (
+  <section className="panel viewer-panel">
+    <div className="panel-heading">
+      <div className="panel-title">
+        <div className="panel-icon"><Box size={17} /></div>
+        <div><h2>Vista previa 3D</h2><p>{modelUrl ? 'Malla lista para inspeccionar' : 'El resultado aparecerá en este espacio'}</p></div>
       </div>
+      {modelUrl ? (
+        <button onClick={onDownload} className="download-button" disabled={downloading}>
+          {downloading ? <Loader className="spinner" size={14} /> : <Download size={14} />}
+          {downloading ? 'Preparando…' : 'Exportar STL'}
+        </button>
+      ) : <span className="viewer-heading-right"><span className="viewer-live-dot" /> PREVISUALIZACIÓN</span>}
+    </div>
 
-      <div className="viewer-container">
-        {error ? (
-          <div className="error-message text-center" style={{ marginTop: '200px' }}>
-            {error}
-          </div>
-        ) : (
-          <Canvas
-            camera={{ position: [5, 5, 5], fov: 50 }}
-            style={{ width: '100%', height: '100%' }}
-          >
-            <Suspense fallback={null}>
-              <ambientLight intensity={0.5} />
-              <spotLight position={[10, 10, 10]} angle={0.15} penumbra={1} />
-              <pointLight position={[-10, -10, -10]} />
-              
-              <STLModel />
-              
-              <Grid
-                args={[20, 20]}
-                cellSize={1}
-                cellThickness={0.5}
-                cellColor="#6b7280"
-                sectionSize={5}
-                sectionThickness={1}
-                sectionColor="#9ca3af"
-                fadeDistance={30}
-                fadeStrength={1}
-                followCamera={false}
-                infiniteGrid={true}
-              />
-              
-              <OrbitControls
-                enablePan={true}
-                enableZoom={true}
-                enableRotate={true}
-                minDistance={2}
-                maxDistance={20}
-              />
-              
-              <Environment preset="studio" />
-            </Suspense>
-          </Canvas>
-        )}
-      </div>
-
+    <div className="viewer-container">
+      <ViewerErrorBoundary resetKey={modelUrl}>
+        <Canvas camera={{ position: [5, 5, 5], fov: 50 }} style={{ width: '100%', height: '100%' }}>
+          <Suspense fallback={null}>
+            <ambientLight intensity={0.75} />
+            <directionalLight position={[5, 8, 5]} intensity={1.35} />
+            {modelUrl && <STLModel key={modelUrl} url={modelUrl} />}
+            <Grid args={[20, 20]} cellSize={1} cellThickness={0.5} cellColor="#50645a" sectionSize={5} sectionThickness={1} sectionColor="#789079" fadeDistance={30} fadeStrength={1} followCamera={false} infiniteGrid />
+            <OrbitControls makeDefault enablePan enableZoom enableRotate minDistance={2} maxDistance={20} />
+            <Environment preset="studio" />
+          </Suspense>
+        </Canvas>
+      </ViewerErrorBoundary>
       {!modelUrl && (
-        <div className="text-center mt-4 text-gray-500">
-          <Loader className="mx-auto mb-2" size={32} />
-          <p>Sube un video y espera a que se genere el modelo 3D</p>
+        <div className="viewer-placeholder">
+          <div className="placeholder-cube"><Box size={34} strokeWidth={1.35} /></div>
+          <strong>Tu modelo tomará forma aquí</strong>
+          <span>Cuando la reconstrucción termine, podrás rotar la pieza y revisar su geometría.</span>
         </div>
       )}
     </div>
-  );
-};
+
+    <div className="viewer-footer">
+      <span><Rotate3D size={13} /> Arrastra para rotar</span>
+      <span><MousePointer2 size={12} /> Rueda para acercar</span>
+    </div>
+  </section>
+);
 
 export default Model3DViewer;
